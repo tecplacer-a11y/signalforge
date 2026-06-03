@@ -94,7 +94,7 @@ aws ec2 authorize-security-group-ingress --group-id "$VPC_SG_ID" \
 
 echo "==> [8/9] ALB + target group + listener"
 ALB_ARN=$(aws elbv2 describe-load-balancers --names signalforge-alb \
-  --query 'LoadBalancers[0].LoadBalancerArn' --output text --region "$REGION" 2>/dev/null)
+  --query 'LoadBalancers[0].LoadBalancerArn' --output text --region "$REGION" 2>/dev/null || echo None)
 if [ "$ALB_ARN" = "None" ] || [ -z "$ALB_ARN" ]; then
   ALB_ARN=$(aws elbv2 create-load-balancer --name signalforge-alb \
     --subnets $SUBNETS --security-groups "$ALB_SG" --type application \
@@ -105,7 +105,7 @@ else
 fi
 
 TG_ARN=$(aws elbv2 describe-target-groups --names signalforge-tg \
-  --query 'TargetGroups[0].TargetGroupArn' --output text --region "$REGION" 2>/dev/null)
+  --query 'TargetGroups[0].TargetGroupArn' --output text --region "$REGION" 2>/dev/null || echo None)
 if [ "$TG_ARN" = "None" ] || [ -z "$TG_ARN" ]; then
   TG_ARN=$(aws elbv2 create-target-group --name signalforge-tg \
     --protocol HTTP --port "$CONTAINER_PORT" --vpc-id "$VPC_ID" \
@@ -118,7 +118,7 @@ else
 fi
 
 LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
-  --query 'Listeners[?Port==`80`].ListenerArn' --output text --region "$REGION" 2>/dev/null)
+  --query 'Listeners[?Port==`80`].ListenerArn' --output text --region "$REGION" 2>/dev/null || echo "")
 if [ -z "$LISTENER_ARN" ] || [ "$LISTENER_ARN" = "None" ]; then
   aws elbv2 create-listener --load-balancer-arn "$ALB_ARN" \
     --protocol HTTP --port 80 \
