@@ -13,7 +13,17 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { eq, desc } from "drizzle-orm";
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+// Managed Postgres (e.g. AWS RDS) requires TLS. RDS presents a cert chain
+// that isn't in the default trust store, so enable SSL but don't verify the
+// chain. A local dev Postgres (DATABASE_URL host = localhost/127.0.0.1) does
+// not use SSL, so disable it there. Override-able via PGSSL=disable|require.
+const dbUrl = process.env.DATABASE_URL || "";
+const isLocal = /@(localhost|127\.0\.0\.1)[:/]/.test(dbUrl);
+const sslSetting =
+  process.env.PGSSL === "disable" || (isLocal && process.env.PGSSL !== "require")
+    ? false
+    : { rejectUnauthorized: false };
+const pool = new Pool({ connectionString: dbUrl, ssl: sslSetting });
 export const db = drizzle(pool);
 
 // Create tables if missing (lightweight migration for prototype)
