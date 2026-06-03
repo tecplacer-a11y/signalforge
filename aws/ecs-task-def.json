@@ -1,0 +1,75 @@
+{
+  "family": "signalforge",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/signalforgeExecutionRole",
+  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/signalforgeTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "signalforge",
+      "image": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/signalforge:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 5000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "NODE_ENV",
+          "value": "production"
+        },
+        {
+          "name": "PORT",
+          "value": "5000"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:signalforge/DATABASE_URL"
+        },
+        {
+          "name": "HUNTER_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:signalforge/HUNTER_API_KEY"
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:signalforge/ANTHROPIC_API_KEY"
+        },
+        {
+          "name": "SLACK_WEBHOOK_URL",
+          "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:signalforge/SLACK_WEBHOOK_URL"
+        },
+        {
+          "name": "AIRTABLE_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:signalforge/AIRTABLE_API_KEY"
+        }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:5000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 20
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/signalforge",
+          "awslogs-region": "<REGION>",
+          "awslogs-stream-prefix": "app",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

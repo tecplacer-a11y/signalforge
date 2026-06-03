@@ -1,0 +1,40 @@
+# Local production-parity stack: SignalForge + Postgres.
+# Run `docker compose up --build`, then open http://localhost:5000
+# This mirrors the AWS topology (app container + managed Postgres) on your laptop.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: signalforge
+      POSTGRES_PASSWORD: signalforge
+      POSTGRES_DB: signalforge
+    ports:
+      - "5432:5432"
+    volumes:
+      - sf_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signalforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "5000"
+      DATABASE_URL: postgresql://signalforge:signalforge@db:5432/signalforge
+      # Provider secrets (fill in or leave blank for demo/simulation mode):
+      HUNTER_API_KEY: ${HUNTER_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      AIRTABLE_API_KEY: ${AIRTABLE_API_KEY:-}
+    ports:
+      - "5000:5000"
+
+volumes:
+  sf_pgdata:
