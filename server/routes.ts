@@ -1,8 +1,10 @@
-import type { Express } from "express";
+import type { Express, Request } from "express";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import { storage } from "./storage";
 import { seedIfEmpty } from "./seed";
+import { requireAuth } from "./auth";
+import { registerAuthRoutes } from "./authRoutes";
 import {
   classifyRole, scoreLead, makeLeadId, isDirectEmail, buildSlackMessage, pickWeeklySlice,
   explainScore, DEFAULT_KEYWORDS, type ClassifierKeywords,
@@ -12,6 +14,17 @@ import { INTAKE_CATALOG, parseLeadText } from "./intake";
 import type { InsertLead } from "@shared/schema";
 
 const now = () => new Date().toISOString();
+
+// Org context for a request. requireAuth (server/auth.ts) attaches req.auth
+// from the verified JWT — or the default-org context when auth is disabled
+// (SUPABASE_URL not configured). The fallback below covers only direct calls
+// that bypass the middleware.
+let _defaultOrgId: string | null = null;
+async function getOrgId(req: Request): Promise<string> {
+  if (req.auth?.orgId) return req.auth.orgId;
+  if (!_defaultOrgId) _defaultOrgId = (await storage.getOrCreateDefaultOrg()).id;
+  return _defaultOrgId;
+}
 
 // Merge stored classifier keywords (JSON) with defaults; empty lists fall back.
 function resolveKeywords(raw?: string | null): ClassifierKeywords {
@@ -43,12 +56,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   try { await seedIfEmpty(); } catch (e) { console.error("[seed] failed:", e); }
 
+  // Auth: public endpoints first, then the JWT guard for everything under
+  // /api/* (signup/login/refresh/logout are allowlisted inside requireAuth).
+  registerAuthRoutes(app);
+  app.use(requireAuth);
+
   // ── Dashboard summary ──
-  app.get("/api/dashboard", async (_req, res) => {
-    const leads = await storage.listLeads();
-    const runs = await storage.listRuns();
-    const scoringCfg = await storage.getScoringConfig();
-    const enrollments = await storage.listEnrollments();
+  app.get("/api/dashboard", async (req, res) => {
+    const orgId = await getOrgId(req);
+    const leads = await storage.listLeads(orgId);
+    const runs = await storage.listRuns(orgId);
+    const scoringCfg = await storage.getScoringConfig(orgId);
+    const enrollments = await storage.listEnrollments(orgId);
     const byTier = { A: 0, B: 0, C: 0 } as Record<string, number>;
     const byChannel: Record<string, number> = {};
     const byStatus: Record<string, number> = {};
@@ -73,45 +92,50 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Leads ── (each lead carries a faithful scoring rationale)
-  app.get("/api/leads", async (_req, res) => {
-    const cfg = await storage.getScoringConfig();
-    const leads = await storage.listLeads();
+  app.get("/api/leads", async (req, res) => {
+    const orgId = await getOrgId(req);
+    const cfg = await storage.getScoringConfig(orgId);
+    const leads = await storage.listLeads(orgId);
     res.json(leads.map((l) => ({ ...l, ...explainScore(l as any, cfg) })));
   });
   app.get("/api/leads/:leadId", async (req, res) => {
-    const lead = await storage.getLead(req.params.leadId);
+    const orgId = await getOrgId(req);
+    const lead = await storage.getLead(orgId, req.params.leadId);
     if (!lead) return res.status(404).json({ error: "not found" });
-    const cfg = await storage.getScoringConfig();
-    const events = await storage.listEvents(req.params.leadId);
-    const enrollments = (await storage.listEnrollments()).filter((e) => e.leadId === req.params.leadId);
+    const cfg = await storage.getScoringConfig(orgId);
+    const events = await storage.listEvents(orgId, req.params.leadId);
+    const enrollments = (await storage.listEnrollments(orgId)).filter((e) => e.leadId === req.params.leadId);
     res.json({ lead: { ...lead, ...explainScore(lead as any, cfg) }, events, enrollments });
   });
   app.patch("/api/leads/:leadId", async (req, res) => {
+    const orgId = await getOrgId(req);
     const patch = { ...req.body, lastUpdated: now() };
-    const updated = await storage.updateLead(req.params.leadId, patch);
+    const updated = await storage.updateLead(orgId, req.params.leadId, patch);
     if (!updated) return res.status(404).json({ error: "not found" });
     if (req.body.status) {
-      await storage.createEvent({ leadId: req.params.leadId, type: "status_change", detail: `→ ${req.body.status}`, actor: "user", createdAt: now() });
+      await storage.createEvent(orgId, { leadId: req.params.leadId, type: "status_change", detail: `→ ${req.body.status}`, actor: "user", createdAt: now() });
     }
     res.json(updated);
   });
   app.post("/api/leads/:leadId/events", async (req, res) => {
-    const ev = await storage.createEvent({ leadId: req.params.leadId, type: req.body.type || "note", detail: req.body.detail || "", actor: req.body.actor || "user", createdAt: now() });
+    const orgId = await getOrgId(req);
+    const ev = await storage.createEvent(orgId, { leadId: req.params.leadId, type: req.body.type || "note", detail: req.body.detail || "", actor: req.body.actor || "user", createdAt: now() });
     res.json(ev);
   });
 
   // ── Pipeline runs ──
-  app.get("/api/runs", async (_req, res) => res.json(await storage.listRuns()));
+  app.get("/api/runs", async (req, res) => res.json(await storage.listRuns(await getOrgId(req))));
 
   // Run the pipeline (simulated): pull source rows → enrich → classify → score → route
   app.post("/api/runs", async (req, res) => {
+    const orgId = await getOrgId(req);
     const channel = (req.body.channel as string) || "B-Disc";
-    const cfg = await storage.getScoringConfig();
+    const cfg = await storage.getScoringConfig(orgId);
     const keywords = resolveKeywords(cfg.classifierKeywords);
     // Only target leads whose ICP slice matches an ACTIVE config slice.
-    const icpConfigs = await storage.listIcpConfigs();
+    const icpConfigs = await storage.listIcpConfigs(orgId);
     const activeSlices = new Set(icpConfigs.filter((c) => c.active).map((c) => c.slice));
-    const run = await storage.createRun({ channel, trigger: "manual", status: "running", startedAt: now() });
+    const run = await storage.createRun(orgId, { channel, trigger: "manual", status: "running", startedAt: now() });
     const count = 2 + Math.floor(Math.random() * 3);
     const eligible = SIM_POOL.filter((p) => activeSlices.size === 0 || activeSlices.has(p.icp));
     const picks = [...eligible].sort(() => Math.random() - 0.5).slice(0, count);
@@ -139,14 +163,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         phone: "", enrichmentNeeded: false, reviewReason: "", missingFields: "",
         workstream: "BD", capturedDate: now(), lastSeen: now(), lastUpdated: now(),
       };
-      await storage.upsertLead(lead);
-      await storage.createEvent({ leadId, type: "captured", detail: `Run #${run.id} — ${lead.signalName}`, actor: "system", createdAt: now() });
-      await storage.createEvent({ leadId, type: "scored", detail: `MEDDPICC ${score} → Tier ${tier}`, actor: "system", createdAt: now() });
+      await storage.upsertLead(orgId, lead);
+      await storage.createEvent(orgId, { leadId, type: "captured", detail: `Run #${run.id} — ${lead.signalName}`, actor: "system", createdAt: now() });
+      await storage.createEvent(orgId, { leadId, type: "scored", detail: `MEDDPICC ${score} → Tier ${tier}`, actor: "system", createdAt: now() });
       routed++;
       if (tier === "A") tierA++; else if (tier === "B") tierB++; else tierC++;
       created.push({ ...lead, ...explainScore(lead as any, cfg), slack: tier === "A" || tier === "B" ? buildSlackMessage(lead) : null });
     }
-    const finished = await storage.updateRun(run.id, {
+    const finished = await storage.updateRun(orgId, run.id, {
       status: "success", ingested: picks.length, deduped: enriched, enriched, scored, routed,
       tierA, tierB, tierC, finishedAt: now(),
     });
@@ -154,33 +178,34 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Sequences ──
-  app.get("/api/sequences", async (_req, res) => res.json(await storage.listSequences()));
-  app.post("/api/sequences", async (req, res) => res.json(await storage.createSequence({ ...req.body, createdAt: now() })));
-  app.patch("/api/sequences/:id", async (req, res) => res.json(await storage.updateSequence(Number(req.params.id), req.body)));
-  app.delete("/api/sequences/:id", async (req, res) => { await storage.deleteSequence(Number(req.params.id)); res.json({ ok: true }); });
+  app.get("/api/sequences", async (req, res) => res.json(await storage.listSequences(await getOrgId(req))));
+  app.post("/api/sequences", async (req, res) => res.json(await storage.createSequence(await getOrgId(req), { ...req.body, createdAt: now() })));
+  app.patch("/api/sequences/:id", async (req, res) => res.json(await storage.updateSequence(await getOrgId(req), Number(req.params.id), req.body)));
+  app.delete("/api/sequences/:id", async (req, res) => { await storage.deleteSequence(await getOrgId(req), Number(req.params.id)); res.json({ ok: true }); });
 
   // ── Enrollments ──
-  app.get("/api/enrollments", async (_req, res) => res.json(await storage.listEnrollments()));
+  app.get("/api/enrollments", async (req, res) => res.json(await storage.listEnrollments(await getOrgId(req))));
   app.post("/api/enrollments", async (req, res) => {
-    const e = await storage.createEnrollment({ leadId: req.body.leadId, sequenceId: req.body.sequenceId, currentStep: 0, status: "active", nextSendAt: now(), enrolledAt: now() });
-    await storage.updateLead(req.body.leadId, { status: "Outreach Active", lastUpdated: now() });
-    await storage.createEvent({ leadId: req.body.leadId, type: "outreach_sent", detail: `Enrolled in sequence #${req.body.sequenceId}`, actor: "user", createdAt: now() });
+    const orgId = await getOrgId(req);
+    const e = await storage.createEnrollment(orgId, { leadId: req.body.leadId, sequenceId: req.body.sequenceId, currentStep: 0, status: "active", nextSendAt: now(), enrolledAt: now() });
+    await storage.updateLead(orgId, req.body.leadId, { status: "Outreach Active", lastUpdated: now() });
+    await storage.createEvent(orgId, { leadId: req.body.leadId, type: "outreach_sent", detail: `Enrolled in sequence #${req.body.sequenceId}`, actor: "user", createdAt: now() });
     res.json(e);
   });
-  app.patch("/api/enrollments/:id", async (req, res) => res.json(await storage.updateEnrollment(Number(req.params.id), req.body)));
+  app.patch("/api/enrollments/:id", async (req, res) => res.json(await storage.updateEnrollment(await getOrgId(req), Number(req.params.id), req.body)));
 
   // ── Config: ICP ──
-  app.get("/api/icp", async (_req, res) => {
-    const configs = await storage.listIcpConfigs();
+  app.get("/api/icp", async (req, res) => {
+    const configs = await storage.listIcpConfigs(await getOrgId(req));
     const current = pickWeeklySlice(configs);
     res.json({ configs, currentSlice: current?.slice || "" });
   });
-  app.post("/api/icp", async (req, res) => res.json(await storage.createIcpConfig(req.body)));
-  app.patch("/api/icp/:id", async (req, res) => res.json(await storage.updateIcpConfig(Number(req.params.id), req.body)));
-  app.delete("/api/icp/:id", async (req, res) => { await storage.deleteIcpConfig(Number(req.params.id)); res.json({ ok: true }); });
+  app.post("/api/icp", async (req, res) => res.json(await storage.createIcpConfig(await getOrgId(req), req.body)));
+  app.patch("/api/icp/:id", async (req, res) => res.json(await storage.updateIcpConfig(await getOrgId(req), Number(req.params.id), req.body)));
+  app.delete("/api/icp/:id", async (req, res) => { await storage.deleteIcpConfig(await getOrgId(req), Number(req.params.id)); res.json({ ok: true }); });
 
   // Classifier-keyword defaults (so the UI can show/reset them)
-  app.get("/api/classifier-defaults", async (_req, res) => res.json(DEFAULT_KEYWORDS));
+  app.get("/api/classifier-defaults", async (req, res) => res.json(DEFAULT_KEYWORDS));
   // Test the classifier against a sample title with live (unsaved) keywords
   app.post("/api/classifier/test", async (req, res) => {
     const kw = resolveKeywords(JSON.stringify(req.body.keywords || {}));
@@ -188,26 +213,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Config: Scoring ──
-  app.get("/api/scoring", async (_req, res) => res.json(await storage.getScoringConfig()));
-  app.patch("/api/scoring", async (req, res) => res.json(await storage.updateScoringConfig(req.body)));
+  app.get("/api/scoring", async (req, res) => res.json(await storage.getScoringConfig(await getOrgId(req))));
+  app.patch("/api/scoring", async (req, res) => res.json(await storage.updateScoringConfig(await getOrgId(req), req.body)));
   // Score preview — lets the UI show how weights affect a sample lead
   app.post("/api/scoring/preview", async (req, res) => {
-    const cfg = await storage.getScoringConfig();
+    const cfg = await storage.getScoringConfig(await getOrgId(req));
     const merged = { ...cfg, ...req.body.config };
     const result = scoreLead(req.body.lead, merged as any);
     res.json(result);
   });
 
   // ── Integrations / Settings ──
-  app.get("/api/integrations", async (_req, res) => res.json(await storage.listIntegrations()));
-  app.patch("/api/integrations/:key", async (req, res) => res.json(await storage.updateIntegration(req.params.key, req.body)));
+  app.get("/api/integrations", async (req, res) => res.json(await storage.listIntegrations(await getOrgId(req))));
+  app.patch("/api/integrations/:key", async (req, res) => res.json(await storage.updateIntegration(await getOrgId(req), req.params.key, req.body)));
 
   // ── Pluggable providers (enrichment / verification / tracking / discovery / alerts) ──
   // The catalog tells the UI what vendors are selectable per category and what
   // config fields each needs. Stored rows track which one is ACTIVE per category.
-  app.get("/api/provider-catalog", async (_req, res) => res.json(PROVIDER_CATALOG));
-  app.get("/api/providers", async (_req, res) => {
-    const rows = await storage.listProviders();
+  app.get("/api/provider-catalog", async (req, res) => res.json(PROVIDER_CATALOG));
+  app.get("/api/providers", async (req, res) => {
+    const rows = await storage.listProviders(await getOrgId(req));
     // Group by category for convenient UI rendering, plus the flat list.
     const byCategory: Record<string, any[]> = {};
     for (const r of rows) (byCategory[r.category] ||= []).push(r);
@@ -219,7 +244,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!body.category || !body.key || !body.label) {
       return res.status(400).json({ error: "category, key and label are required" });
     }
-    const created = await storage.createProvider({
+    const created = await storage.createProvider(await getOrgId(req), {
       category: body.category, key: body.key, label: body.label,
       active: !!body.active, connected: !!body.connected,
       envVar: body.envVar || "", baseUrl: body.baseUrl || "",
@@ -231,29 +256,30 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.patch("/api/providers/:key", async (req, res) => {
     const patch = { ...req.body };
     if (patch.config && typeof patch.config !== "string") patch.config = JSON.stringify(patch.config);
-    const updated = await storage.updateProvider(req.params.key, patch);
+    const updated = await storage.updateProvider(await getOrgId(req), req.params.key, patch);
     if (!updated) return res.status(404).json({ error: "not found" });
     res.json(updated);
   });
   app.delete("/api/providers/:key", async (req, res) => {
-    await storage.deleteProvider(req.params.key);
+    await storage.deleteProvider(await getOrgId(req), req.params.key);
     res.json({ ok: true });
   });
   // Choose the active provider for a category (deactivates the others).
   app.post("/api/providers/:category/activate", async (req, res) => {
     if (!req.body?.key) return res.status(400).json({ error: "key is required" });
-    await storage.setActiveProvider(req.params.category, req.body.key);
-    const rows = (await storage.listProviders()).filter((p) => p.category === req.params.category);
+    const orgId = await getOrgId(req);
+    await storage.setActiveProvider(orgId, req.params.category, req.body.key);
+    const rows = (await storage.listProviders(orgId)).filter((p) => p.category === req.params.category);
     res.json({ ok: true, providers: rows });
   });
 
   // ── Pluggable lead intake (email poll / manual text / voice / webhook / CSV / form) ──
-  app.get("/api/intake-catalog", async (_req, res) => res.json(INTAKE_CATALOG));
-  app.get("/api/intake-sources", async (_req, res) => res.json(await storage.listIntakeSources()));
+  app.get("/api/intake-catalog", async (req, res) => res.json(INTAKE_CATALOG));
+  app.get("/api/intake-sources", async (req, res) => res.json(await storage.listIntakeSources(await getOrgId(req))));
   app.post("/api/intake-sources", async (req, res) => {
     const b = req.body || {};
     if (!b.key || !b.kind || !b.label) return res.status(400).json({ error: "key, kind and label required" });
-    const created = await storage.createIntakeSource({
+    const created = await storage.createIntakeSource(await getOrgId(req), {
       key: b.key, kind: b.kind, label: b.label, enabled: !!b.enabled,
       channel: b.channel || "C",
       config: typeof b.config === "string" ? b.config : JSON.stringify(b.config || {}),
@@ -264,12 +290,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.patch("/api/intake-sources/:key", async (req, res) => {
     const patch = { ...req.body };
     if (patch.config && typeof patch.config !== "string") patch.config = JSON.stringify(patch.config);
-    const updated = await storage.updateIntakeSource(req.params.key, patch);
+    const updated = await storage.updateIntakeSource(await getOrgId(req), req.params.key, patch);
     if (!updated) return res.status(404).json({ error: "not found" });
     res.json(updated);
   });
   app.delete("/api/intake-sources/:key", async (req, res) => {
-    await storage.deleteIntakeSource(req.params.key);
+    await storage.deleteIntakeSource(await getOrgId(req), req.params.key);
     res.json({ ok: true });
   });
 
@@ -282,7 +308,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // transcript. Runs the same classify → score → dedup → route pipeline as
   // automated channels. body = { source?, channel?, text?, lead?: {…fields} }
   app.post("/api/intake", async (req, res) => {
-    const cfg = await storage.getScoringConfig();
+    const orgId = await getOrgId(req);
+    const cfg = await storage.getScoringConfig(orgId);
     const keywords = resolveKeywords(cfg.classifierKeywords);
     const sourceKey = req.body?.source || "manual_text";
     const channel = (req.body?.channel as string) || "C";
@@ -318,7 +345,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     // 4) Dedup via deterministic lead_id + route. Pass companyName so
     // name-only intake (voice/manual without a domain) still gets a stable id.
     const leadId = makeLeadId({ companyDomain: domain, firstName, lastName, email, channel, companyName: company, signalName: f.signalName });
-    const existing = await storage.getLead(leadId);
+    const existing = await storage.getLead(orgId, leadId);
     const lead: InsertLead = {
       leadId, email, firstName, lastName, title,
       companyName: company, companyDomain: domain, channel,
@@ -336,10 +363,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       missingFields: missing.join(","), workstream: "BD",
       capturedDate: now(), lastSeen: now(), lastUpdated: now(),
     };
-    await storage.upsertLead(lead);
-    await storage.createEvent({ leadId, type: existing ? "updated" : "captured", detail: `Intake — ${sourceKey}${existing ? " (dedup: merged)" : ""}`, actor: "user", createdAt: now() });
-    if (!enrichmentNeeded) await storage.createEvent({ leadId, type: "scored", detail: `MEDDPICC ${score} → Tier ${tier}`, actor: "system", createdAt: now() });
-    await storage.updateIntakeSource(sourceKey, { lastIngestAt: now() }).catch(() => {});
+    await storage.upsertLead(orgId, lead);
+    await storage.createEvent(orgId, { leadId, type: existing ? "updated" : "captured", detail: `Intake — ${sourceKey}${existing ? " (dedup: merged)" : ""}`, actor: "user", createdAt: now() });
+    if (!enrichmentNeeded) await storage.createEvent(orgId, { leadId, type: "scored", detail: `MEDDPICC ${score} → Tier ${tier}`, actor: "system", createdAt: now() });
+    await storage.updateIntakeSource(orgId, sourceKey, { lastIngestAt: now() }).catch(() => {});
 
     res.json({
       lead: { ...lead, ...explainScore(lead as any, cfg) },
@@ -348,8 +375,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Users / sharing ──
-  app.get("/api/users", async (_req, res) => res.json(await storage.listUsers()));
-  app.post("/api/users", async (req, res) => res.json(await storage.createUser(req.body)));
+  app.get("/api/users", async (req, res) => res.json(await storage.listUsers(await getOrgId(req))));
+  app.post("/api/users", async (req, res) => res.json(await storage.createUser(await getOrgId(req), req.body)));
 
   return httpServer;
 }

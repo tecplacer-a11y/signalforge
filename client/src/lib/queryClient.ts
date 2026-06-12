@@ -9,12 +9,43 @@ async function throwIfResNotOk(res: Response) {
   }
 }
 
+// ── 401 handling (Task 1.7) ──
+// Tokens live in httpOnly cookies, so the client never touches them. On a
+// 401 we POST /api/auth/refresh once (deduped across concurrent requests)
+// and retry. If refresh also fails, we notify the AuthProvider, which flips
+// the app to the login screen.
+let refreshPromise: Promise<boolean> | null = null;
+function tryRefresh(): Promise<boolean> {
+  if (!refreshPromise) {
+    refreshPromise = fetch(`${API_BASE}/api/auth/refresh`, { method: "POST" })
+      .then((r) => r.ok)
+      .catch(() => false)
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+  return refreshPromise;
+}
+
+export async function fetchWithRefresh(url: string, init?: RequestInit): Promise<Response> {
+  let res = await fetch(url, init);
+  // Retry-on-401 applies to everything except the refresh endpoint itself
+  // (login/signup/logout use plain fetch). This covers /api/auth/me on page
+  // load: an expired access token with a valid refresh cookie silently
+  // renews instead of bouncing the user to the login screen.
+  if (res.status === 401 && !url.includes("/api/auth/refresh")) {
+    if (await tryRefresh()) res = await fetch(url, init);
+    if (res.status === 401) window.dispatchEvent(new Event("sf:unauthorized"));
+  }
+  return res;
+}
+
 export async function apiRequest(
   method: string,
   url: string,
   data?: unknown | undefined,
 ): Promise<Response> {
-  const res = await fetch(`${API_BASE}${url}`, {
+  const res = await fetchWithRefresh(`${API_BASE}${url}`, {
     method,
     headers: data ? { "Content-Type": "application/json" } : {},
     body: data ? JSON.stringify(data) : undefined,
@@ -30,7 +61,7 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const res = await fetch(`${API_BASE}${queryKey.join("/")}`);
+    const res = await fetchWithRefresh(`${API_BASE}${queryKey.join("/")}`);
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
       return null;

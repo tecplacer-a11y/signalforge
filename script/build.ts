@@ -14,6 +14,7 @@ const allowlist = [
   "express",
   "express-rate-limit",
   "express-session",
+  "jose", // ESM-only — must be bundled into the CJS output
   "jsonwebtoken",
   "memorystore",
   "multer",
@@ -45,11 +46,12 @@ async function buildAll() {
   const externals = allDeps.filter((dep) => !allowlist.includes(dep));
 
   await esbuild({
-    entryPoints: ["server/index.ts"],
+    entryPoints: ["server/index.ts", "server/migrate.ts"],
     platform: "node",
     bundle: true,
     format: "cjs",
-    outfile: "dist/index.cjs",
+    outdir: "dist",
+    outExtension: { ".js": ".cjs" },
     define: {
       "process.env.NODE_ENV": '"production"',
     },

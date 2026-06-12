@@ -1,18 +1,55 @@
-import { pgTable, text, integer, serial, doublePrecision, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, serial, doublePrecision, boolean, uuid, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+
+// ─────────────────────────────────────────────────────────────
+// ORGANIZATIONS (tenants) — every tenant-scoped table carries org_id
+// ─────────────────────────────────────────────────────────────
+export const organizations = pgTable("organizations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  slug: text("slug").notNull().unique(), // used in URLs, e.g. iconstaff
+  plan: text("plan").notNull().default("trial"), // trial | starter | growth | enterprise
+  status: text("status").notNull().default("active"), // active | suspended | payment_failed
+  stripeCustomerId: text("stripe_customer_id").default(""),
+  leadsThisPeriod: integer("leads_this_period").default(0),
+  periodResetsAt: timestamp("period_resets_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+export const insertOrganizationSchema = createInsertSchema(organizations).omit({ id: true, createdAt: true });
+export type InsertOrganization = z.infer<typeof insertOrganizationSchema>;
+export type Organization = typeof organizations.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────
+// ORG MEMBERS (user ↔ org with role; user_id is the auth provider's UUID)
+// ─────────────────────────────────────────────────────────────
+export const orgMembers = pgTable("org_members", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull(), // Supabase Auth user UUID (Task 1.4)
+  role: text("role").notNull().default("member"), // owner | admin | member | viewer
+  invitedBy: uuid("invited_by"),
+  joinedAt: timestamp("joined_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  uniqueIndex("org_members_org_user_unique").on(t.orgId, t.userId),
+  index("idx_org_members_user").on(t.userId),
+]);
+export const insertOrgMemberSchema = createInsertSchema(orgMembers).omit({ id: true, joinedAt: true });
+export type InsertOrgMember = z.infer<typeof insertOrgMemberSchema>;
+export type OrgMember = typeof orgMembers.$inferSelect;
 
 // ─────────────────────────────────────────────────────────────
 // USERS (team members + partners — sharing with roles)
 // ─────────────────────────────────────────────────────────────
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
+  orgId: uuid("org_id").references(() => organizations.id), // nullable: user exists before org assignment
   name: text("name").notNull(),
   email: text("email").notNull().unique(),
   role: text("role").notNull().default("member"), // admin | member | viewer
   createdAt: text("created_at").notNull(),
 });
-export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
+export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true, orgId: true });
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
 
@@ -21,7 +58,8 @@ export type User = typeof users.$inferSelect;
 // ─────────────────────────────────────────────────────────────
 export const leads = pgTable("leads", {
   id: serial("id").primaryKey(),
-  leadId: text("lead_id").notNull().unique(), // deterministic dedup key
+  orgId: uuid("org_id").notNull().references(() => organizations.id),
+  leadId: text("lead_id").notNull(), // deterministic dedup key (unique per org)
   email: text("email").default(""),
   firstName: text("first_name").default(""),
   lastName: text("last_name").default(""),
@@ -50,8 +88,10 @@ export const leads = pgTable("leads", {
   capturedDate: text("captured_date").notNull(),
   lastSeen: text("last_seen").notNull(),
   lastUpdated: text("last_updated").notNull(),
-});
-export const insertLeadSchema = createInsertSchema(leads).omit({ id: true });
+}, (t) => [
+  uniqueIndex("leads_org_lead_id_unique").on(t.orgId, t.leadId), // dedup key is per-tenant
+]);
+export const insertLeadSchema = createInsertSchema(leads).omit({ id: true, orgId: true });
 export type InsertLead = z.infer<typeof insertLeadSchema>;
 export type Lead = typeof leads.$inferSelect;
 
@@ -60,6 +100,7 @@ export type Lead = typeof leads.$inferSelect;
 // ─────────────────────────────────────────────────────────────
 export const pipelineRuns = pgTable("pipeline_runs", {
   id: serial("id").primaryKey(),
+  orgId: uuid("org_id").notNull().references(() => organizations.id),
   channel: text("channel").notNull(), // A | B-Sig | B-Disc | all
   trigger: text("trigger").notNull().default("manual"), // manual | scheduled
   status: text("status").notNull().default("running"), // running | success | error
@@ -74,8 +115,8 @@ export const pipelineRuns = pgTable("pipeline_runs", {
   errorMessage: text("error_message").default(""),
   startedAt: text("started_at").notNull(),
   finishedAt: text("finished_at").default(""),
-});
-export const insertPipelineRunSchema = createInsertSchema(pipelineRuns).omit({ id: true });
+}, (t) => [index("idx_pipeline_runs_org").on(t.orgId)]);
+export const insertPipelineRunSchema = createInsertSchema(pipelineRuns).omit({ id: true, orgId: true });
 export type InsertPipelineRun = z.infer<typeof insertPipelineRunSchema>;
 export type PipelineRun = typeof pipelineRuns.$inferSelect;
 
@@ -84,13 +125,14 @@ export type PipelineRun = typeof pipelineRuns.$inferSelect;
 // ─────────────────────────────────────────────────────────────
 export const events = pgTable("events", {
   id: serial("id").primaryKey(),
+  orgId: uuid("org_id").notNull().references(() => organizations.id),
   leadId: text("lead_id").notNull(),
   type: text("type").notNull(), // captured | enriched | scored | status_change | outreach_sent | replied | meeting | note
   detail: text("detail").default(""),
   actor: text("actor").default("system"),
   createdAt: text("created_at").notNull(),
-});
-export const insertEventSchema = createInsertSchema(events).omit({ id: true });
+}, (t) => [index("idx_events_org").on(t.orgId)]);
+export const insertEventSchema = createInsertSchema(events).omit({ id: true, orgId: true });
 export type InsertEvent = z.infer<typeof insertEventSchema>;
 export type Event = typeof events.$inferSelect;
 
@@ -99,6 +141,7 @@ export type Event = typeof events.$inferSelect;
 // ─────────────────────────────────────────────────────────────
 export const sequences = pgTable("sequences", {
   id: serial("id").primaryKey(),
+  orgId: uuid("org_id").notNull().references(() => organizations.id),
   name: text("name").notNull(),
   description: text("description").default(""),
   channel: text("channel").default("email"), // email | linkedin | mixed
@@ -106,8 +149,8 @@ export const sequences = pgTable("sequences", {
   autoEnrollTier: text("auto_enroll_tier").default(""), // "" | A | B | C — auto-enroll new leads of this tier
   steps: text("steps").default("[]"), // JSON: [{order, delayDays, channel, subject, body}]
   createdAt: text("created_at").notNull(),
-});
-export const insertSequenceSchema = createInsertSchema(sequences).omit({ id: true });
+}, (t) => [index("idx_sequences_org").on(t.orgId)]);
+export const insertSequenceSchema = createInsertSchema(sequences).omit({ id: true, orgId: true });
 export type InsertSequence = z.infer<typeof insertSequenceSchema>;
 export type Sequence = typeof sequences.$inferSelect;
 
@@ -116,14 +159,15 @@ export type Sequence = typeof sequences.$inferSelect;
 // ─────────────────────────────────────────────────────────────
 export const enrollments = pgTable("enrollments", {
   id: serial("id").primaryKey(),
+  orgId: uuid("org_id").notNull().references(() => organizations.id),
   leadId: text("lead_id").notNull(),
   sequenceId: integer("sequence_id").notNull(),
   currentStep: integer("current_step").default(0),
   status: text("status").default("active"), // active | paused | replied | bounced | completed
   nextSendAt: text("next_send_at").default(""),
   enrolledAt: text("enrolled_at").notNull(),
-});
-export const insertEnrollmentSchema = createInsertSchema(enrollments).omit({ id: true });
+}, (t) => [index("idx_enrollments_org").on(t.orgId)]);
+export const insertEnrollmentSchema = createInsertSchema(enrollments).omit({ id: true, orgId: true });
 export type InsertEnrollment = z.infer<typeof insertEnrollmentSchema>;
 export type Enrollment = typeof enrollments.$inferSelect;
 
@@ -132,6 +176,7 @@ export type Enrollment = typeof enrollments.$inferSelect;
 // ─────────────────────────────────────────────────────────────
 export const icpConfigs = pgTable("icp_configs", {
   id: serial("id").primaryKey(),
+  orgId: uuid("org_id").notNull().references(() => organizations.id),
   slice: text("slice").notNull(), // AI/ML | Robotics | Hardware
   active: boolean("active").default(true),
   industries: text("industries").default("[]"), // JSON array
@@ -140,8 +185,8 @@ export const icpConfigs = pgTable("icp_configs", {
   fundingStages: text("funding_stages").default('["seed","series_a","series_b","series_c"]'),
   country: text("country").default("US"),
   rotationOrder: integer("rotation_order").default(0), // week % 3 slot
-});
-export const insertIcpConfigSchema = createInsertSchema(icpConfigs).omit({ id: true });
+}, (t) => [index("idx_icp_configs_org").on(t.orgId)]);
+export const insertIcpConfigSchema = createInsertSchema(icpConfigs).omit({ id: true, orgId: true });
 export type InsertIcpConfig = z.infer<typeof insertIcpConfigSchema>;
 export type IcpConfig = typeof icpConfigs.$inferSelect;
 
@@ -151,6 +196,7 @@ export type IcpConfig = typeof icpConfigs.$inferSelect;
 // ─────────────────────────────────────────────────────────────
 export const scoringConfigs = pgTable("scoring_configs", {
   id: serial("id").primaryKey(),
+  orgId: uuid("org_id").notNull().references(() => organizations.id),
   baselineA: integer("baseline_a").default(60),
   baselineBSig: integer("baseline_b_sig").default(45),
   baselineBDisc: integer("baseline_b_disc").default(30),
@@ -165,8 +211,8 @@ export const scoringConfigs = pgTable("scoring_configs", {
   // Fully editable role-classifier keyword lists (JSON). Lets the user retarget
   // to ANY vertical/function without touching code. Empty => use code defaults.
   classifierKeywords: text("classifier_keywords").default("{}"),
-});
-export const insertScoringConfigSchema = createInsertSchema(scoringConfigs).omit({ id: true });
+}, (t) => [index("idx_scoring_configs_org").on(t.orgId)]);
+export const insertScoringConfigSchema = createInsertSchema(scoringConfigs).omit({ id: true, orgId: true });
 export type InsertScoringConfig = z.infer<typeof insertScoringConfigSchema>;
 export type ScoringConfig = typeof scoringConfigs.$inferSelect;
 
@@ -175,13 +221,14 @@ export type ScoringConfig = typeof scoringConfigs.$inferSelect;
 // ─────────────────────────────────────────────────────────────
 export const integrations = pgTable("integrations", {
   id: serial("id").primaryKey(),
-  key: text("key").notNull().unique(), // gmail | outlook | hunter | anthropic | slack | quickmail
+  orgId: uuid("org_id").notNull().references(() => organizations.id),
+  key: text("key").notNull(), // gmail | outlook | hunter | anthropic | slack | quickmail (unique per org)
   label: text("label").notNull(),
   connected: boolean("connected").default(false),
   envVar: text("env_var").default(""), // name of the env var holding the secret
   meta: text("meta").default("{}"), // JSON misc (schedule, channel, etc.)
-});
-export const insertIntegrationSchema = createInsertSchema(integrations).omit({ id: true });
+}, (t) => [uniqueIndex("integrations_org_key_unique").on(t.orgId, t.key)]);
+export const insertIntegrationSchema = createInsertSchema(integrations).omit({ id: true, orgId: true });
 export type InsertIntegration = z.infer<typeof insertIntegrationSchema>;
 export type Integration = typeof integrations.$inferSelect;
 
@@ -193,8 +240,9 @@ export type Integration = typeof integrations.$inferSelect;
 // ─────────────────────────────────────────────────────────────
 export const providers = pgTable("providers", {
   id: serial("id").primaryKey(),
+  orgId: uuid("org_id").notNull().references(() => organizations.id),
   category: text("category").notNull(), // enrichment | verification | tracking | discovery | alerts
-  key: text("key").notNull().unique(),  // hunter | apollo | clearbit | zoominfo | airtable | hubspot | salesforce | pipedrive | notion | sheets | slack | custom
+  key: text("key").notNull(),  // hunter | apollo | clearbit | zoominfo | airtable | hubspot | salesforce | pipedrive | notion | sheets | slack | custom (unique per org)
   label: text("label").notNull(),
   active: boolean("active").default(false), // the chosen provider for its category
   connected: boolean("connected").default(false),
@@ -202,8 +250,8 @@ export const providers = pgTable("providers", {
   baseUrl: text("base_url").default(""), // for custom/self-hosted endpoints
   config: text("config").default("{}"), // JSON: field mappings, table/base ids, etc.
   builtin: boolean("builtin").default(true),
-});
-export const insertProviderSchema = createInsertSchema(providers).omit({ id: true });
+}, (t) => [uniqueIndex("providers_org_key_unique").on(t.orgId, t.key)]);
+export const insertProviderSchema = createInsertSchema(providers).omit({ id: true, orgId: true });
 export type InsertProvider = z.infer<typeof insertProviderSchema>;
 export type Provider = typeof providers.$inferSelect;
 
@@ -219,7 +267,8 @@ export const PROVIDER_CATEGORIES = ["enrichment", "verification", "tracking", "d
 // ─────────────────────────────────────────────
 export const intakeSources = pgTable("intake_sources", {
   id: serial("id").primaryKey(),
-  key: text("key").notNull().unique(), // email_poll | manual_text | voice | webhook | csv_upload | form | hunter_signal | hunter_discover
+  orgId: uuid("org_id").notNull().references(() => organizations.id),
+  key: text("key").notNull(), // email_poll | manual_text | voice | webhook | csv_upload | form | hunter_signal | hunter_discover (unique per org)
   kind: text("kind").notNull(),        // email | manual | voice | webhook | upload | form | discovery
   label: text("label").notNull(),
   enabled: boolean("enabled").default(false),
@@ -227,8 +276,8 @@ export const intakeSources = pgTable("intake_sources", {
   config: text("config").default("{}"),  // JSON: folder, schedule, webhook token, field mappings, etc.
   builtin: boolean("builtin").default(true),
   lastIngestAt: text("last_ingest_at").default(""),
-});
-export const insertIntakeSourceSchema = createInsertSchema(intakeSources).omit({ id: true });
+}, (t) => [uniqueIndex("intake_sources_org_key_unique").on(t.orgId, t.key)]);
+export const insertIntakeSourceSchema = createInsertSchema(intakeSources).omit({ id: true, orgId: true });
 export type InsertIntakeSource = z.infer<typeof insertIntakeSourceSchema>;
 export type IntakeSource = typeof intakeSources.$inferSelect;
 

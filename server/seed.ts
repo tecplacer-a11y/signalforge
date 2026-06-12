@@ -1,4 +1,4 @@
-import { storage, db, ensureSchema } from "./storage";
+import { storage, db } from "./storage";
 import { integrations, providers, intakeSources } from "@shared/schema";
 import { defaultProviderRows } from "./providers";
 import { defaultIntakeRows } from "./intake";
@@ -51,36 +51,59 @@ const SEQUENCES = [
   },
 ];
 
-export async function seedIfEmpty() {
-  await ensureSchema();
-  const existing = await storage.listLeads();
-  if (existing.length > 0) return { seeded: false };
-
-  // Scoring config
-  const cfg = await storage.getScoringConfig();
-
-  // ICP configs (rotation: AI/ML=0, Robotics=1, Hardware=2)
-  await storage.createIcpConfig({ slice: "AI/ML", active: true, rotationOrder: 0, country: "US",
+// Defaults every NEW tenant org gets on signup (Task 1.6): scoring config,
+// the 3 starter ICP slices, provider catalog rows, and intake sources.
+// No demo leads — those are only seeded into the default org for dev/demo.
+export async function seedOrgDefaults(orgId: string) {
+  await storage.getScoringConfig(orgId); // creates the per-org row on first access
+  await storage.createIcpConfig(orgId, { slice: "AI/ML", active: true, rotationOrder: 0, country: "US",
     industries: JSON.stringify(["Software Development", "IT Services and IT Consulting", "Computers and Electronics Manufacturing"]),
     technologies: JSON.stringify(["PyTorch", "CUDA", "Ray"]),
     headcount: '["11-50","51-200"]', fundingStages: '["seed","series_a","series_b","series_c"]' });
-  await storage.createIcpConfig({ slice: "Robotics", active: true, rotationOrder: 1, country: "US",
+  await storage.createIcpConfig(orgId, { slice: "Robotics", active: true, rotationOrder: 1, country: "US",
     industries: JSON.stringify(["Robot Manufacturing", "Robotics Engineering", "Industrial Automation"]),
     technologies: JSON.stringify(["ROS"]),
     headcount: '["11-50","51-200"]', fundingStages: '["seed","series_a","series_b","series_c"]' });
-  await storage.createIcpConfig({ slice: "Hardware", active: true, rotationOrder: 2, country: "US",
+  await storage.createIcpConfig(orgId, { slice: "Hardware", active: true, rotationOrder: 2, country: "US",
+    industries: JSON.stringify(["Semiconductors", "Computer Hardware Manufacturing", "Computer Hardware"]),
+    technologies: JSON.stringify([]),
+    headcount: '["11-50","51-200"]', fundingStages: '["seed","series_a","series_b","series_c"]' });
+  for (const row of defaultProviderRows()) await db.insert(providers).values({ ...row, orgId });
+  for (const row of defaultIntakeRows()) await db.insert(intakeSources).values({ ...row, orgId });
+}
+
+export async function seedIfEmpty() {
+  // All seed data belongs to the default org (single-tenant bridge until Task 1.4).
+  const org = await storage.getOrCreateDefaultOrg();
+  const orgId = org.id;
+  const existing = await storage.listLeads(orgId);
+  if (existing.length > 0) return { seeded: false };
+
+  // Scoring config
+  const cfg = await storage.getScoringConfig(orgId);
+
+  // ICP configs (rotation: AI/ML=0, Robotics=1, Hardware=2)
+  await storage.createIcpConfig(orgId, { slice: "AI/ML", active: true, rotationOrder: 0, country: "US",
+    industries: JSON.stringify(["Software Development", "IT Services and IT Consulting", "Computers and Electronics Manufacturing"]),
+    technologies: JSON.stringify(["PyTorch", "CUDA", "Ray"]),
+    headcount: '["11-50","51-200"]', fundingStages: '["seed","series_a","series_b","series_c"]' });
+  await storage.createIcpConfig(orgId, { slice: "Robotics", active: true, rotationOrder: 1, country: "US",
+    industries: JSON.stringify(["Robot Manufacturing", "Robotics Engineering", "Industrial Automation"]),
+    technologies: JSON.stringify(["ROS"]),
+    headcount: '["11-50","51-200"]', fundingStages: '["seed","series_a","series_b","series_c"]' });
+  await storage.createIcpConfig(orgId, { slice: "Hardware", active: true, rotationOrder: 2, country: "US",
     industries: JSON.stringify(["Semiconductors", "Computer Hardware Manufacturing", "Computer Hardware"]),
     technologies: JSON.stringify([]),
     headcount: '["11-50","51-200"]', fundingStages: '["seed","series_a","series_b","series_c"]' });
 
   // Users (team + a partner)
-  await storage.createUser({ name: "Vito Chesky", email: "vito@iconstafflabs.com", role: "admin" });
-  await storage.createUser({ name: "Sam Rivera", email: "sam@iconstafflabs.com", role: "member" });
-  await storage.createUser({ name: "Partner (Read-only)", email: "partner@example.com", role: "viewer" });
+  await storage.createUser(orgId, { name: "Vito Chesky", email: "vito@iconstafflabs.com", role: "admin" });
+  await storage.createUser(orgId, { name: "Sam Rivera", email: "sam@iconstafflabs.com", role: "member" });
+  await storage.createUser(orgId, { name: "Partner (Read-only)", email: "partner@example.com", role: "viewer" });
 
   // Sequences
   const seqRows = [];
-  for (const s of SEQUENCES) seqRows.push(await storage.createSequence({ ...s, createdAt: now() }));
+  for (const s of SEQUENCES) seqRows.push(await storage.createSequence(orgId, { ...s, createdAt: now() }));
 
   // Leads — run them through the real pipeline logic
   const statuses = ["Scored", "Outreach Active", "Responded", "Meeting Booked", "Validated", "Review Required", "Nurture"];
@@ -116,17 +139,17 @@ export async function seedIfEmpty() {
       missingFields: missing.join(", "), workstream: "BD",
       capturedDate: daysAgo(14 - (i % 14)), lastSeen: daysAgo(i % 7), lastUpdated: daysAgo(i % 5),
     };
-    await storage.upsertLead(lead);
-    await storage.createEvent({ leadId, type: "captured", detail: `Captured via channel ${r.channel} — ${r.signal}`, actor: "system", createdAt: lead.capturedDate });
+    await storage.upsertLead(orgId, lead);
+    await storage.createEvent(orgId, { leadId, type: "captured", detail: `Captured via channel ${r.channel} — ${r.signal}`, actor: "system", createdAt: lead.capturedDate });
     if (!enrichmentNeeded) {
-      await storage.createEvent({ leadId, type: "enriched", detail: `Hunter domain search + verify (${verifier})`, actor: "system", createdAt: lead.lastSeen });
-      await storage.createEvent({ leadId, type: "scored", detail: `MEDDPICC ${score} → Tier ${tier}`, actor: "system", createdAt: lead.lastUpdated });
+      await storage.createEvent(orgId, { leadId, type: "enriched", detail: `Hunter domain search + verify (${verifier})`, actor: "system", createdAt: lead.lastSeen });
+      await storage.createEvent(orgId, { leadId, type: "scored", detail: `MEDDPICC ${score} → Tier ${tier}`, actor: "system", createdAt: lead.lastUpdated });
     }
     // enroll Tier A/B into matching sequences
     if (tier === "A" && !enrichmentNeeded) {
-      await storage.createEnrollment({ leadId, sequenceId: seqRows[0].id, currentStep: i % 3, status: status === "Responded" ? "replied" : "active", nextSendAt: daysAgo(-2), enrolledAt: lead.lastSeen });
+      await storage.createEnrollment(orgId, { leadId, sequenceId: seqRows[0].id, currentStep: i % 3, status: status === "Responded" ? "replied" : "active", nextSendAt: daysAgo(-2), enrolledAt: lead.lastSeen });
     } else if (tier === "B" && !enrichmentNeeded) {
-      await storage.createEnrollment({ leadId, sequenceId: seqRows[1].id, currentStep: i % 2, status: "active", nextSendAt: daysAgo(-4), enrolledAt: lead.lastSeen });
+      await storage.createEnrollment(orgId, { leadId, sequenceId: seqRows[1].id, currentStep: i % 2, status: "active", nextSendAt: daysAgo(-4), enrolledAt: lead.lastSeen });
     }
     i++;
   }
@@ -135,7 +158,7 @@ export async function seedIfEmpty() {
   for (let k = 0; k < 6; k++) {
     const ch = ["A", "B-Sig", "B-Disc", "A", "B-Sig", "all"][k];
     const ingested = 8 + (k * 3) % 12;
-    const run = await storage.createRun({
+    const run = await storage.createRun(orgId, {
       channel: ch, trigger: k % 2 === 0 ? "scheduled" : "manual", status: k === 1 ? "error" : "success",
       ingested, deduped: Math.floor(ingested * 0.7), enriched: Math.floor(ingested * 0.6),
       scored: Math.floor(ingested * 0.5), routed: Math.floor(ingested * 0.4),
@@ -155,14 +178,14 @@ export async function seedIfEmpty() {
     { key: "slack", label: "Slack Alerts", connected: true, envVar: "SLACK_BOT_TOKEN", meta: JSON.stringify({ hotChannel: "#bd-hot-leads", warmChannel: "#bd-warm-leads" }) },
     { key: "quickmail", label: "QuickMail Nurture", connected: false, envVar: "QUICKMAIL_API_KEY", meta: "{}" },
   ];
-  for (const it of ints) await db.insert(integrations).values(it);
+  for (const it of ints) await db.insert(integrations).values({ ...it, orgId });
 
   // Pluggable providers (enrichment / verification / tracking / discovery / alerts)
   // Defaults match the original n8n workflow: Hunter + Airtable + Slack active.
-  for (const row of defaultProviderRows()) await db.insert(providers).values(row);
+  for (const row of defaultProviderRows()) await db.insert(providers).values({ ...row, orgId });
 
   // Pluggable intake sources (email polling + Hunter + manual/voice/webhook on by default)
-  for (const row of defaultIntakeRows()) await db.insert(intakeSources).values(row);
+  for (const row of defaultIntakeRows()) await db.insert(intakeSources).values({ ...row, orgId });
 
   return { seeded: true, leads: RAW.length };
 }

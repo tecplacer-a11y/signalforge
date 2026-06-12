@@ -1,10 +1,12 @@
 import { defineConfig } from "drizzle-kit";
 
 export default defineConfig({
-  out: "./migrations",
+  out: "./drizzle/migrations",
   schema: "./shared/schema.ts",
   dialect: "postgresql",
   dbCredentials: {
-    url: process.env.DATABASE_URL!,
+    // Only needed for db-connected commands (migrate/push/studio).
+    // `drizzle-kit generate` works offline.
+    url: process.env.DATABASE_URL ?? "",
   },
 });

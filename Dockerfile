@@ -31,6 +31,8 @@ RUN groupadd -r app && useradd -r -g app app
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
+# SQL migrations — applied by dist/migrate.cjs before the server starts
+COPY --from=build /app/drizzle ./drizzle
 
 USER app
 EXPOSE 5000
@@ -39,4 +41,5 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||5000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["node", "dist/index.cjs"]
+# Run pending DB migrations, then start the server
+CMD ["sh", "-c", "node dist/migrate.cjs && node dist/index.cjs"]

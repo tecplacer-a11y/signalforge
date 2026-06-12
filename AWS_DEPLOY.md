@@ -54,9 +54,32 @@ VPC_SG_ID=sg-xxxxxxxx \              # SG that allows 5432 from the app
 This creates a `db.t3.micro` Postgres 16 instance (`signalforge-db`), waits for it,
 builds the `DATABASE_URL`, and stores it in Secrets Manager as `signalforge/DATABASE_URL`.
 
-> The app auto-creates its tables on first boot (`ensureSchema()` runs idempotent
-> `CREATE TABLE IF NOT EXISTS` DDL), so no manual migration step is required.
-> If you prefer managed migrations, run `npm run db:push` with `DATABASE_URL` set.
+> Schema is managed by Drizzle Kit migrations (`drizzle/migrations/`, committed to git).
+> The container applies pending migrations automatically before the server starts
+> (`node dist/migrate.cjs && node dist/index.cjs`), so no manual migration step is required.
+> Manual apply: `npm run db:migrate`. Generate after a schema change: `npm run db:generate`.
+
+### Supabase Auth secrets
+
+Auth (JWT verification + login/signup) requires a Supabase project
+(supabase.com → New project). Store its credentials in Secrets Manager:
+
+```bash
+for k in SUPABASE_URL SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY; do
+  aws secretsmanager create-secret --name "signalforge/$k" --secret-string "<value>"
+done
+```
+
+- `SUPABASE_URL` — Project Settings → API → Project URL
+- `SUPABASE_ANON_KEY` — Project Settings → API → anon/public key
+- `SUPABASE_SERVICE_ROLE_KEY` — Project Settings → API → service_role key (admin; never expose to the client)
+- Optional `SUPABASE_JWT_SECRET` — only for legacy projects that sign tokens
+  with a shared HS256 secret; new projects are verified via the public JWKS
+  endpoint automatically.
+
+> If `SUPABASE_URL` is not set, auth is DISABLED: the API stays open and all
+> data is attributed to the default org (the pre-multi-tenancy behavior).
+> A warning is logged at startup. Do not run production this way.
 
 Store provider secrets too (only the ones you use):
 

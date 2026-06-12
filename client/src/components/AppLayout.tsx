@@ -12,10 +12,12 @@ import {
   Sun,
   Menu,
   X,
+  LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { LogoWordmark } from "@/components/Logo";
 import { useTheme } from "@/lib/theme";
+import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { RunPipelineButton } from "@/components/RunPipelineButton";
 import { AddLeadButton } from "@/components/AddLeadDialog";
@@ -58,6 +60,28 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
+// Workspace + sign-out footer, shown only when auth is enabled server-side.
+function AccountFooter() {
+  const { state, logout } = useAuth();
+  if (state.status !== "authed" || !state.authEnabled) return null;
+  return (
+    <div className="px-1 space-y-1">
+      <p className="truncate text-[11px] text-muted-foreground" title={state.user.email}>
+        {state.org?.name || state.user.email}
+      </p>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="w-full justify-start gap-2 text-muted-foreground"
+        onClick={() => logout()}
+        data-testid="button-logout"
+      >
+        <LogOut className="h-4 w-4" /> Sign out
+      </Button>
+    </div>
+  );
+}
+
 export function AppLayout({ children }: { children: ReactNode }) {
   const { theme, toggle } = useTheme();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -73,6 +97,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
           <NavLinks />
           <div className="px-3 pb-4 pt-2 border-t border-sidebar-border space-y-3">
             <RunPipelineButton className="w-full" />
+            <AccountFooter />
             <p className="px-1 text-[11px] leading-snug text-muted-foreground">
               Icon Staff Labs · BD signal pipeline
             </p>
@@ -100,8 +125,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 </Button>
               </div>
               <NavLinks onNavigate={() => setMobileOpen(false)} />
-              <div className="px-3 pb-4 pt-2 border-t border-sidebar-border">
+              <div className="px-3 pb-4 pt-2 border-t border-sidebar-border space-y-3">
                 <RunPipelineButton className="w-full" />
+                <AccountFooter />
               </div>
             </aside>
           </div>

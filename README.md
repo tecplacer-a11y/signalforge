@@ -47,7 +47,8 @@ The app auto-creates its tables on boot and seeds 15 demo leads when empty.
 | `npm run build` | Build client + server bundle into `dist/` |
 | `npm start` | Run the production bundle (`dist/index.cjs`) |
 | `npm run check` | TypeScript typecheck |
-| `npm run db:push` | Apply Drizzle schema to the DB |
+| `npm run db:generate` | Generate a new SQL migration from schema changes |
+| `npm run db:migrate` | Apply pending migrations to the DB |
 
 ## Deployment
 
