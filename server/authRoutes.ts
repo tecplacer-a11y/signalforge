@@ -1,5 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { createClient } from "@supabase/supabase-js";
+import ws from "ws";
 import { z } from "zod";
 import { storage } from "./storage";
 import { seedOrgDefaults } from "./seed";
@@ -20,12 +21,17 @@ import {
 
 const ACCESS_COOKIE = "sf_access_token";
 
+// supabase-js initializes its realtime module on client creation; Node 20
+// has no native WebSocket, so inject the ws package as the transport.
+// (We never open realtime channels — this only satisfies the constructor.)
+const clientOptions = {
+  auth: { persistSession: false, autoRefreshToken: false },
+  realtime: { transport: ws as any },
+};
 // service-role client: admin user creation (bypasses email confirmation)
-const adminClient = () =>
-  createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+const adminClient = () => createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, clientOptions);
 // anon client: password grant + refresh
-const anonClient = () =>
-  createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+const anonClient = () => createClient(SUPABASE_URL, SUPABASE_ANON_KEY, clientOptions);
 
 function setSessionCookies(res: Response, session: { access_token: string; refresh_token: string; expires_in?: number }) {
   const secure = process.env.NODE_ENV === "production";
