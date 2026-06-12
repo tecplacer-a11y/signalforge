@@ -1,5 +1,4 @@
-import { storage, db } from "./storage";
-import { integrations, providers, intakeSources } from "@shared/schema";
+import { storage } from "./storage";
 import { defaultProviderRows } from "./providers";
 import { defaultIntakeRows } from "./intake";
 import { makeLeadId, classifyRole, scoreLead, isDirectEmail } from "./pipeline";
@@ -68,8 +67,8 @@ export async function seedOrgDefaults(orgId: string) {
     industries: JSON.stringify(["Semiconductors", "Computer Hardware Manufacturing", "Computer Hardware"]),
     technologies: JSON.stringify([]),
     headcount: '["11-50","51-200"]', fundingStages: '["seed","series_a","series_b","series_c"]' });
-  for (const row of defaultProviderRows()) await db.insert(providers).values({ ...row, orgId });
-  for (const row of defaultIntakeRows()) await db.insert(intakeSources).values({ ...row, orgId });
+  for (const row of defaultProviderRows()) await storage.createProvider(orgId, row);
+  for (const row of defaultIntakeRows()) await storage.createIntakeSource(orgId, row);
 }
 
 export async function seedIfEmpty() {
@@ -178,14 +177,14 @@ export async function seedIfEmpty() {
     { key: "slack", label: "Slack Alerts", connected: true, envVar: "SLACK_BOT_TOKEN", meta: JSON.stringify({ hotChannel: "#bd-hot-leads", warmChannel: "#bd-warm-leads" }) },
     { key: "quickmail", label: "QuickMail Nurture", connected: false, envVar: "QUICKMAIL_API_KEY", meta: "{}" },
   ];
-  for (const it of ints) await db.insert(integrations).values({ ...it, orgId });
+  for (const it of ints) await storage.createIntegration(orgId, it);
 
   // Pluggable providers (enrichment / verification / tracking / discovery / alerts)
   // Defaults match the original n8n workflow: Hunter + Airtable + Slack active.
-  for (const row of defaultProviderRows()) await db.insert(providers).values({ ...row, orgId });
+  for (const row of defaultProviderRows()) await storage.createProvider(orgId, row);
 
   // Pluggable intake sources (email polling + Hunter + manual/voice/webhook on by default)
-  for (const row of defaultIntakeRows()) await db.insert(intakeSources).values({ ...row, orgId });
+  for (const row of defaultIntakeRows()) await storage.createIntakeSource(orgId, row);
 
   return { seeded: true, leads: RAW.length };
 }
