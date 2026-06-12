@@ -76,8 +76,12 @@ export const queryClient = new QueryClient({
     queries: {
       queryFn: getQueryFn({ on401: "throw" }),
       refetchInterval: false,
-      refetchOnWindowFocus: false,
-      staleTime: Infinity,
+      // Freshness over thrift: staleTime Infinity + no focus refetch meant a
+      // screen (or second tab) that wasn't explicitly invalidated could show
+      // stale data forever. 30s staleness + refetch on focus/mount keeps all
+      // views consistent after edits without meaningful extra load.
+      refetchOnWindowFocus: true,
+      staleTime: 30 * 1000,
       retry: false,
     },
     mutations: {

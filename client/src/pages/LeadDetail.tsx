@@ -322,6 +322,7 @@ function Enrollments({ leadId, enrollments, sequences }: { leadId: string; enrol
       setOpen(false);
       setSeqId("");
       queryClient.invalidateQueries({ queryKey: ["/api/leads", leadId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/leads"] }); // enrollment flips lead status → list must refresh
       queryClient.invalidateQueries({ queryKey: ["/api/enrollments"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
       toast({ title: "Enrolled in sequence" });
