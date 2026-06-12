@@ -27,6 +27,10 @@
         {
           "name": "PORT",
           "value": "5000"
+        },
+        {
+          "name": "TRUST_PROXY_HOPS",
+          "value": "2"
         }
       ],
       "secrets": [

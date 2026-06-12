@@ -37,7 +37,10 @@ function setSessionCookies(req: Request, res: Response, session: { access_token:
   // Secure flag follows the actual connection (via X-Forwarded-Proto behind
   // the ALB — see trust proxy in index.ts). Browsers silently drop Secure
   // cookies on plain http, which would break login until HTTPS is added.
-  const secure = req.secure;
+  // CloudFront terminates TLS but talks plain http to the ALB, so also
+  // honor its CloudFront-Forwarded-Proto header (forwarded by the
+  // AllViewerAndCloudFrontHeaders origin request policy).
+  const secure = req.secure || req.headers["cloudfront-forwarded-proto"] === "https";
   res.cookie(ACCESS_COOKIE, session.access_token, {
     httpOnly: true, secure, sameSite: "lax", path: "/",
     maxAge: (session.expires_in ?? 3600) * 1000,
@@ -72,6 +75,12 @@ function requireAuthConfigured(res: Response): boolean {
   if (!authEnabled) {
     res.status(503).json({
       error: "auth is not configured on this deployment (SUPABASE_URL missing)",
+    });
+    return false;
+  }
+  if (!SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) {
+    res.status(503).json({
+      error: "auth is misconfigured: SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY missing",
     });
     return false;
   }

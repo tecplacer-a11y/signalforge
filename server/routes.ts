@@ -1,6 +1,7 @@
 import type { Express, Request } from "express";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
+import rateLimit from "express-rate-limit";
 import { storage } from "./storage";
 import { seedIfEmpty } from "./seed";
 import { requireAuth } from "./auth";
@@ -126,8 +127,19 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ── Pipeline runs ──
   app.get("/api/runs", async (req, res) => res.json(await storage.listRuns(await getOrgId(req))));
 
+  // Pipeline trigger abuse guard: 10 runs/hour per org (Phase 2.2).
+  // Runs after requireAuth, so req.auth is always set; keyed by org, not IP.
+  const runsLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => req.auth?.orgId ?? "anonymous",
+    message: { error: "pipeline run limit reached (10/hour) — try again later" },
+  });
+
   // Run the pipeline (simulated): pull source rows → enrich → classify → score → route
-  app.post("/api/runs", async (req, res) => {
+  app.post("/api/runs", runsLimiter, async (req, res) => {
     const orgId = await getOrgId(req);
     const channel = (req.body.channel as string) || "B-Disc";
     const cfg = await storage.getScoringConfig(orgId);

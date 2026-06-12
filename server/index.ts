@@ -2,15 +2,57 @@ import "dotenv/config";
 import express, { Response, NextFunction } from 'express';
 import type { Request } from 'express';
 import cookieParser from "cookie-parser";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "node:http";
 
 const app = express();
-// Behind the ALB: trust X-Forwarded-* so req.secure / req.ip are correct
-// (cookie Secure flag, and rate limiting in Phase 2, depend on these).
-app.set("trust proxy", 1);
+// Trust X-Forwarded-* so req.secure / req.ip are correct (cookie Secure
+// flag and rate limiting depend on these). Hops from the client:
+//   ALB only → 1 (default)   CloudFront → ALB → app → 2 (set in task def)
+app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS || "1"));
 const httpServer = createServer(app);
+
+// ── Security headers (Phase 2.1) ──
+// CSP only in production: the Vite dev server needs inline/eval scripts.
+// 'unsafe-inline' styles are required by Radix/Recharts inline style attrs.
+app.use(helmet({
+  contentSecurityPolicy: process.env.NODE_ENV === "production" ? {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:"],
+      fontSrc: ["'self'", "data:"],
+      connectSrc: ["'self'"],
+      frameAncestors: ["'none'"],
+    },
+  } : false,
+  crossOriginEmbedderPolicy: false, // not needed; avoids breaking embedded assets
+}));
+
+// ── Rate limiting (Phase 2.2) ──
+// Note: per-task in-memory counters; effective limit scales with ECS task
+// count. Good enough until a shared store is warranted.
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "too many requests — try again later" },
+});
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10, // brute-force protection on credential endpoints
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "too many auth attempts — try again in 15 minutes" },
+});
+app.use("/api/auth/login", authLimiter);
+app.use("/api/auth/signup", authLimiter);
+app.use("/api", apiLimiter); // /healthz stays unlimited for the ALB
 
 declare module "http" {
   interface IncomingMessage {
