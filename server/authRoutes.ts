@@ -33,8 +33,11 @@ const adminClient = () => createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, 
 // anon client: password grant + refresh
 const anonClient = () => createClient(SUPABASE_URL, SUPABASE_ANON_KEY, clientOptions);
 
-function setSessionCookies(res: Response, session: { access_token: string; refresh_token: string; expires_in?: number }) {
-  const secure = process.env.NODE_ENV === "production";
+function setSessionCookies(req: Request, res: Response, session: { access_token: string; refresh_token: string; expires_in?: number }) {
+  // Secure flag follows the actual connection (via X-Forwarded-Proto behind
+  // the ALB — see trust proxy in index.ts). Browsers silently drop Secure
+  // cookies on plain http, which would break login until HTTPS is added.
+  const secure = req.secure;
   res.cookie(ACCESS_COOKIE, session.access_token, {
     httpOnly: true, secure, sameSite: "lax", path: "/",
     maxAge: (session.expires_in ?? 3600) * 1000,
@@ -105,7 +108,7 @@ export function registerAuthRoutes(app: Express) {
     if (signInErr || !signIn?.session) {
       return res.status(201).json({ user: { id: created.user.id, email }, org, session: null });
     }
-    setSessionCookies(res, signIn.session);
+    setSessionCookies(req, res, signIn.session);
     res.status(201).json({
       user: { id: created.user.id, email, name },
       org: { id: org.id, name: org.name, slug: org.slug, plan: org.plan },
@@ -127,7 +130,7 @@ export function registerAuthRoutes(app: Express) {
       return res.status(403).json({ error: "no organization membership" });
     }
     const org = await storage.getOrganization(memberships[0].orgId);
-    setSessionCookies(res, data.session);
+    setSessionCookies(req, res, data.session);
     res.json({
       user: { id: data.user.id, email: data.user.email, name: data.user.user_metadata?.name },
       org: org ? { id: org.id, name: org.name, slug: org.slug, plan: org.plan } : null,
@@ -145,7 +148,7 @@ export function registerAuthRoutes(app: Express) {
       clearSessionCookies(res);
       return res.status(401).json({ error: "refresh failed — log in again" });
     }
-    setSessionCookies(res, data.session);
+    setSessionCookies(req, res, data.session);
     res.json({ ok: true });
   });
 

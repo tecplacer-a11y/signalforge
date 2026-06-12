@@ -7,6 +7,9 @@ import { serveStatic } from "./static";
 import { createServer } from "node:http";
 
 const app = express();
+// Behind the ALB: trust X-Forwarded-* so req.secure / req.ip are correct
+// (cookie Secure flag, and rate limiting in Phase 2, depend on these).
+app.set("trust proxy", 1);
 const httpServer = createServer(app);
 
 declare module "http" {
